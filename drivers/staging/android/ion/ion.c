@@ -48,7 +48,6 @@
 #include "ion_secure_util.h"
 
 static struct ion_device *internal_dev;
-static atomic_long_t total_heap_bytes;
 
 int ion_walk_heaps(int heap_id, enum ion_heap_type type, void *data,
 		   int (*f)(struct ion_heap *heap, void *data))
@@ -176,7 +175,6 @@ static struct ion_buffer *ion_buffer_create(struct ion_heap *heap,
 	ion_buffer_add(dev, buffer);
 	mutex_unlock(&dev->buffer_lock);
 	atomic_long_add(len, &heap->total_allocated);
-	atomic_long_add(len, &total_heap_bytes);
 	return buffer;
 
 err1:
@@ -206,7 +204,6 @@ static void _ion_buffer_destroy(struct ion_buffer *buffer)
 	mutex_lock(&dev->buffer_lock);
 	rb_erase(&buffer->node, &dev->buffers);
 	mutex_unlock(&dev->buffer_lock);
-	atomic_long_sub(buffer->size, &total_heap_bytes);
 
 	atomic_long_sub(buffer->size, &buffer->heap->total_allocated);
 	if (heap->flags & ION_HEAP_FLAG_DEFER_FREE)
@@ -1331,55 +1328,6 @@ void ion_device_add_heap(struct ion_device *dev, struct ion_heap *heap)
 }
 EXPORT_SYMBOL(ion_device_add_heap);
 
-static ssize_t
-total_heaps_kb_show(struct kobject *kobj, struct kobj_attribute *attr,
-		    char *buf)
-{
-	u64 size_in_bytes = atomic_long_read(&total_heap_bytes);
-
-	return sprintf(buf, "%llu\n", div_u64(size_in_bytes, 1024));
-}
-
-static ssize_t
-total_pools_kb_show(struct kobject *kobj, struct kobj_attribute *attr,
-		    char *buf)
-{
-	u64 size_in_bytes = ion_page_pool_nr_pages() * PAGE_SIZE;
-
-	return sprintf(buf, "%llu\n", div_u64(size_in_bytes, 1024));
-}
-
-static struct kobj_attribute total_heaps_kb_attr =
-	__ATTR_RO(total_heaps_kb);
-
-static struct kobj_attribute total_pools_kb_attr =
-	__ATTR_RO(total_pools_kb);
-
-static struct attribute *ion_device_attrs[] = {
-	&total_heaps_kb_attr.attr,
-	&total_pools_kb_attr.attr,
-	NULL,
-};
-
-ATTRIBUTE_GROUPS(ion_device);
-
-static int ion_init_sysfs(void)
-{
-	struct kobject *ion_kobj;
-	int ret;
-
-	ion_kobj = kobject_create_and_add("ion", kernel_kobj);
-	if (!ion_kobj)
-		return -ENOMEM;
-
-	ret = sysfs_create_groups(ion_kobj, ion_device_groups);
-	if (ret) {
-		kobject_put(ion_kobj);
-		return ret;
-	}
-
-	return 0;
-}
 static int ion_debug_allbufs_show(struct seq_file *s, void *unused)
 {
 	struct ion_device *dev = s->private;
@@ -1420,7 +1368,6 @@ static const struct file_operations debug_allbufs_fops = {
 	.release = single_release,
 };
 
-
 struct ion_device *ion_device_create(void)
 {
 	struct ion_device *idev;
@@ -1437,13 +1384,8 @@ struct ion_device *ion_device_create(void)
 	ret = misc_register(&idev->dev);
 	if (ret) {
 		pr_err("ion: failed to register misc device.\n");
-		goto err_reg;
-	}
-
-	ret = ion_init_sysfs();
-	if (ret) {
-		pr_err("ion: failed to add sysfs attributes.\n");
-		goto err_sysfs;
+		kfree(idev);
+		return ret;
 	}
 
 	idev->debug_root = debugfs_create_dir("ion", NULL);
@@ -1462,11 +1404,5 @@ debugfs_done:
 	debugfs_create_file("check_all_bufs", 0664, idev->debug_root, idev,
 		&debug_allbufs_fops);
 	return idev;
-
-err_sysfs:
-	misc_deregister(&idev->dev);
-err_reg:
-	kfree(idev);
-	return ERR_PTR(ret);
 }
 EXPORT_SYMBOL(ion_device_create);
